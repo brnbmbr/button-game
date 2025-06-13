@@ -31,7 +31,7 @@ io.on("connection", (socket) => {
       config: null
     };
     socket.join(keyphrase);
-<<<<<<< HEAD
+ HEAD
     io.to(keyphrase).emit("joined", { players: lobbies[keyphrase].players });
     console.log(`Lobby created: ${keyphrase} by ${socket.id}`);
   });
@@ -72,7 +72,7 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-=======
+
     io.to(keyphrase).emit("joined", {
       players: lobbies[keyphrase].players
     });
@@ -129,5 +129,5 @@ server.listen(PORT, () => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
->>>>>>> 16c8261 (Update: improved lobby and game start handling)
+ 16c8261 (Update: improved lobby and game start handling)
 });
