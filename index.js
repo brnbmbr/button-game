@@ -14,10 +14,7 @@ const io = new Server(server, {
   }
 });
 
-HEAD
 // In-memory store for active lobbies
-
-// All active lobbies
 const lobbies = {};
 
 io.on("connection", (socket) => {
@@ -31,48 +28,6 @@ io.on("connection", (socket) => {
       config: null
     };
     socket.join(keyphrase);
- HEAD
-    io.to(keyphrase).emit("joined", { players: lobbies[keyphrase].players });
-    console.log(`Lobby created: ${keyphrase} by ${socket.id}`);
-  });
-
-  socket.on("joinLobby", ({ keyphrase }) => {
-    if (!lobbies[keyphrase]) return;
-    lobbies[keyphrase].players.push(socket.id);
-    socket.join(keyphrase);
-    io.to(keyphrase).emit("joined", { players: lobbies[keyphrase].players });
-    console.log(`Player ${socket.id} joined lobby ${keyphrase}`);
-  });
-
-  socket.on("startGame", ({ keyphrase }) => {
-    if (lobbies[keyphrase]?.host === socket.id) {
-      io.to(keyphrase).emit("startCountdown");
-      console.log(`Game started in lobby: ${keyphrase}`);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    console.log(`Client disconnected: ${socket.id}`);
-    for (const key in lobbies) {
-      const index = lobbies[key].players.indexOf(socket.id);
-      if (index !== -1) {
-        lobbies[key].players.splice(index, 1);
-        if (lobbies[key].host === socket.id || lobbies[key].players.length === 0) {
-          delete lobbies[key];
-          console.log(`Lobby ${key} closed`);
-        } else {
-          io.to(key).emit("joined", { players: lobbies[key].players });
-        }
-      }
-    }
-  });
-});
-
-// Railway uses process.env.PORT in production
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-
     io.to(keyphrase).emit("joined", {
       players: lobbies[keyphrase].players
     });
@@ -129,5 +84,4 @@ server.listen(PORT, () => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
- 16c8261 (Update: improved lobby and game start handling)
 });
