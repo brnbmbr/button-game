@@ -18,7 +18,6 @@ HEAD
 // In-memory store for active lobbies
 
 // All active lobbies
- f53f52d (Update: improved lobby and game start handling)
 const lobbies = {};
 
 io.on("connection", (socket) => {
