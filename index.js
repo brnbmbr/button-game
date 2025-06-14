@@ -1,3 +1,11 @@
+// ================================
+// BACKEND: Button Game (Express + Socket.IO)
+// ================================
+// Features:
+// - Game state management, prize assignment, player pick tracking
+// - Real-time updates via Socket.IO
+// - Tracks picks remaining per player, unique prize keys
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -6,7 +14,6 @@ const { v4: uuidv4 } = require("uuid");
 
 const app = express();
 app.use(cors());
-
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -15,134 +22,115 @@ const io = new Server(server, {
   }
 });
 
-// In-memory store for active lobbies
 const lobbies = {};
 
 io.on("connection", (socket) => {
-  console.log(`Client connected: ${socket.id}`);
+  console.log(`Connected: ${socket.id}`);
 
-  // Create lobby
   socket.on("createLobby", ({ keyphrase, nickname }) => {
     lobbies[keyphrase] = {
       host: socket.id,
-      players: [{ id: socket.id, nickname }],
+      hostNickname: nickname,
       config: null,
-      picks: {},
-      prizeMap: {},
+      players: {},
+      buttons: {},
+      remainingPicks: {},
       leaderboard: {},
-      clicked: new Set()
     };
+    lobbies[keyphrase].players[socket.id] = { id: socket.id, nickname };
     socket.join(keyphrase);
-    io.to(keyphrase).emit("joined", { players: lobbies[keyphrase].players });
+    io.to(keyphrase).emit("joined", { players: Object.values(lobbies[keyphrase].players) });
   });
 
-  // Join lobby
-  socket.on("joinLobby", ({ keyphrase, nickname, entryKey }) => {
+  socket.on("joinLobby", ({ keyphrase, nickname }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby) return;
-    lobby.players.push({ id: socket.id, nickname, entryKey });
+    if (!lobby || lobby.config?.started) return;
+    lobby.players[socket.id] = { id: socket.id, nickname };
     socket.join(keyphrase);
-    io.to(keyphrase).emit("joined", { players: lobby.players });
+    io.to(keyphrase).emit("joined", { players: Object.values(lobby.players) });
   });
 
-  // Start game
   socket.on("startGame", ({ keyphrase, config }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby || socket.id !== lobby.host) return;
-
+    if (!lobby || lobby.host !== socket.id) return;
+    config.started = true;
     lobby.config = config;
 
-    // Randomly assign prize buttons
+    // Button setup
     const totalButtons = 99;
-    const buttons = [...Array(totalButtons).keys()].map((i) => i + 1);
-    buttons.sort(() => Math.random() - 0.5);
+    const allButtons = Array.from({ length: totalButtons }, (_, i) => i + 1);
+    const shuffle = (arr) => arr.sort(() => 0.5 - Math.random());
+    const randomized = shuffle([...allButtons]);
 
-    const prizeMap = {};
-    let i = 0;
+    lobby.grandPrizeMap = {};
+    lobby.consolationMap = {};
 
-    for (const prize of config.grandPrizes) {
-      prizeMap[buttons[i++]] = { type: "grand", value: prize, code: uuidv4() };
-    }
+    config.grandPrizes.forEach((prize, i) => {
+      const btn = randomized.pop();
+      const code = uuidv4();
+      lobby.grandPrizeMap[btn] = { prize, code };
+    });
 
-    for (const prize of config.consolationPrizes) {
-      prizeMap[buttons[i++]] = { type: "consolation", value: prize, code: uuidv4() };
-    }
+    config.consolationPrizes.forEach((prize, i) => {
+      const btn = randomized.pop();
+      const code = uuidv4();
+      lobby.consolationMap[btn] = { prize, code };
+    });
 
-    lobby.prizeMap = prizeMap;
+    // Setup picks per player
+    Object.entries(lobby.players).forEach(([id, player]) => {
+      const isHost = id === lobby.host;
+      lobby.remainingPicks[player.nickname] = (isHost && !config.hostIsPlayer) ? 0 : config.picks;
+    });
 
-    // Assign picks
-    lobby.picks = {};
-    for (const p of lobby.players) {
-      if (!config.hostIsPlayer && p.id === lobby.host) continue;
-      lobby.picks[p.nickname] = config.picks;
-    }
-
-    io.to(keyphrase).emit("updateRemainingPicks", lobby.picks);
+    io.to(keyphrase).emit("updateRemainingPicks", lobby.remainingPicks);
     io.to(keyphrase).emit("startCountdown");
   });
 
-  // Player picks a button
   socket.on("pickButton", ({ keyphrase, button, nickname }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby || lobby.clicked.has(button)) return;
+    if (!lobby || !lobby.config || lobby.remainingPicks[nickname] <= 0) return;
+    if (!lobby.config.allowDuplicates && lobby.buttons[button]) return;
 
-    const picksRemaining = lobby.picks[nickname];
-    if (picksRemaining === undefined || picksRemaining <= 0) return;
+    lobby.remainingPicks[nickname] -= 1;
+    lobby.buttons[button] = true;
 
-    // Decrement pick count
-    lobby.picks[nickname] -= 1;
-    lobby.clicked.add(button);
-    io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
-    io.to(keyphrase).emit("updateRemainingPicks", lobby.picks);
+    const send = (msg, code = null) => io.to(socket.id).emit("prizeWon", { message: msg, code });
+    let resultMsg = "Sorry, Better Luck Next Time!";
 
-    const prize = lobby.prizeMap[button];
-
-    if (prize) {
-      // Update leaderboard
-      lobby.leaderboard[nickname] = prize.value;
-      io.to(keyphrase).emit("leaderboardUpdate", lobby.leaderboard);
-
-      // Notify winner
-      io.to(socket.id).emit("prizeWon", {
-        message: prize.type === "grand"
-          ? `GRAND PRIZE! You've won ${prize.value}`
-          : `You won a booby prize! Please enjoy ${prize.value}.`,
-        code: prize.code
-      });
+    if (lobby.grandPrizeMap[button]) {
+      const { prize, code } = lobby.grandPrizeMap[button];
+      resultMsg = `🎉 GRAND PRIZE! You've Won ${prize}!`;
+      lobby.leaderboard[nickname] = prize;
+      delete lobby.grandPrizeMap[button];
+      send(resultMsg, code);
+    } else if (lobby.consolationMap[button]) {
+      const { prize, code } = lobby.consolationMap[button];
+      resultMsg = `You won a booby prize! Please enjoy ${prize}!`;
+      lobby.leaderboard[nickname] = prize;
+      delete lobby.consolationMap[button];
+      send(resultMsg, code);
     } else {
-      const tries = lobby.picks[nickname];
-      const message =
-        tries > 0
-          ? `Sorry, Better Luck Next Time! You still have ${tries} more tries!`
-          : `Sorry, Better Luck Next Time! You're out of tries.`;
-      io.to(socket.id).emit("prizeWon", { message });
+      send(`${resultMsg} You still have ${lobby.remainingPicks[nickname]} more tries!`);
     }
+
+    io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
+    io.to(keyphrase).emit("updateRemainingPicks", lobby.remainingPicks);
+    io.to(keyphrase).emit("leaderboardUpdate", lobby.leaderboard);
   });
 
-  // Disconnect handler
   socket.on("disconnect", () => {
     for (const key in lobbies) {
       const lobby = lobbies[key];
-      const idx = lobby.players.findIndex((p) => p.id === socket.id);
-      if (idx !== -1) {
-        const playerName = lobby.players[idx].nickname;
-        lobby.players.splice(idx, 1);
-        delete lobby.picks[playerName];
-        delete lobby.leaderboard[playerName];
-
-        if (lobby.players.length === 0 || lobby.host === socket.id) {
-          delete lobbies[key];
-        } else {
-          io.to(key).emit("joined", { players: lobby.players });
-        }
+      if (lobby.players[socket.id]) {
+        delete lobby.players[socket.id];
+        io.to(key).emit("joined", { players: Object.values(lobby.players) });
+        if (Object.keys(lobby.players).length === 0) delete lobbies[key];
         break;
       }
     }
   });
 });
 
-// Launch server
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server on ${PORT}`));
