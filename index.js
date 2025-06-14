@@ -5,6 +5,7 @@
 // - Game state management, prize assignment, player pick tracking
 // - Real-time updates via Socket.IO
 // - Tracks picks remaining per player, unique prize keys
+// - NEW: Tracks per-player button picks to support multiple correct selections
 
 const express = require("express");
 const http = require("http");
@@ -36,6 +37,7 @@ io.on("connection", (socket) => {
       buttons: {},
       remainingPicks: {},
       leaderboard: {},
+      pickedButtons: {} // NEW: Track buttons picked per player
     };
     lobbies[keyphrase].players[socket.id] = { id: socket.id, nickname };
     socket.join(keyphrase);
@@ -79,6 +81,7 @@ io.on("connection", (socket) => {
     Object.entries(lobby.players).forEach(([id, player]) => {
       const isHost = id === lobby.host;
       lobby.remainingPicks[id] = (isHost && !config.hostIsPlayer) ? 0 : config.picks;
+      lobby.pickedButtons[id] = new Set(); // Initialize set for per-player tracking
     });
 
     io.to(keyphrase).emit("updateRemainingPicks", formatRemainingPicks(lobby));
@@ -90,61 +93,47 @@ io.on("connection", (socket) => {
     if (!lobby || !lobby.config) return;
 
     const playerId = socket.id;
-    const nickname = lobby.players[playerId]?.nickname || "Unknown Player";
+    if (lobby.remainingPicks[playerId] <= 0) return;
+    if (lobby.pickedButtons[playerId]?.has(button)) return; // Prevent duplicate picks by player
+    if (!lobby.config.allowDuplicates && lobby.buttons[button]) return; // Prevent shared duplicates
 
-    // Don't allow more picks than permitted
-    if (lobby.remainingPicks[playerId] <= 0) {
-      io.to(playerId).emit("prizeWon", {
-        message: "You are out of picks!"
-      });
-      return;
-    }
-
-    // Don't allow selecting already picked button (if disallowed)
-    if (!lobby.config.allowDuplicates && lobby.buttons[button]) {
-      io.to(playerId).emit("prizeWon", {
-        message: "This button has already been picked!"
-      });
-      return;
-    }
-
-    // Record the pick
     lobby.remainingPicks[playerId] -= 1;
+    lobby.pickedButtons[playerId].add(button);
     lobby.buttons[button] = true;
 
-    // Prepare prize message
+    const nickname = lobby.players[playerId]?.nickname || "Unknown Player";
+    const send = (msg, code = null) => io.to(playerId).emit("prizeWon", { message: msg, code });
+
     let resultMsg = "Sorry, Better Luck Next Time!";
-    let code = null;
 
     if (lobby.grandPrizeMap[button]) {
-      const prizeObj = lobby.grandPrizeMap[button];
-      resultMsg = `🎉 GRAND PRIZE! You've Won ${prizeObj.prize}!`;
-      code = prizeObj.code;
-      lobby.leaderboard[nickname] = prizeObj.prize;
+      const { prize, code } = lobby.grandPrizeMap[button];
+      resultMsg = `🎉 GRAND PRIZE! You've Won ${prize}!`;
+      lobby.leaderboard[nickname] = prize;
       delete lobby.grandPrizeMap[button];
+      send(resultMsg, code);
     } else if (lobby.consolationMap[button]) {
-      const prizeObj = lobby.consolationMap[button];
-      resultMsg = `You won a booby prize! Please enjoy ${prizeObj.prize}!`;
-      code = prizeObj.code;
-      lobby.leaderboard[nickname] = prizeObj.prize;
+      const { prize, code } = lobby.consolationMap[button];
+      resultMsg = `You won a booby prize! Please enjoy ${prize}!`;
+      lobby.leaderboard[nickname] = prize;
       delete lobby.consolationMap[button];
+      send(resultMsg, code);
     } else {
-      resultMsg += ` You still have ${lobby.remainingPicks[playerId]} more tries!`;
+      send(`${resultMsg} You still have ${lobby.remainingPicks[playerId]} more tries!`);
     }
 
-    // Emit results
-    io.to(playerId).emit("prizeWon", { message: resultMsg, code });
     io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
     io.to(keyphrase).emit("updateRemainingPicks", formatRemainingPicks(lobby));
     io.to(keyphrase).emit("leaderboardUpdate", lobby.leaderboard);
   });
-
 
   socket.on("disconnect", () => {
     for (const key in lobbies) {
       const lobby = lobbies[key];
       if (lobby.players[socket.id]) {
         delete lobby.players[socket.id];
+        delete lobby.remainingPicks[socket.id];
+        delete lobby.pickedButtons[socket.id];
         io.to(key).emit("joined", { players: Object.values(lobby.players) });
         if (Object.keys(lobby.players).length === 0) delete lobbies[key];
         break;
