@@ -90,37 +90,55 @@ io.on("connection", (socket) => {
     if (!lobby || !lobby.config) return;
 
     const playerId = socket.id;
-    if (lobby.remainingPicks[playerId] <= 0) return;
-    if (!lobby.config.allowDuplicates && lobby.buttons[button]) return;
+    const nickname = lobby.players[playerId]?.nickname || "Unknown Player";
 
+    // Don't allow more picks than permitted
+    if (lobby.remainingPicks[playerId] <= 0) {
+      io.to(playerId).emit("prizeWon", {
+        message: "You are out of picks!"
+      });
+      return;
+    }
+
+    // Don't allow selecting already picked button (if disallowed)
+    if (!lobby.config.allowDuplicates && lobby.buttons[button]) {
+      io.to(playerId).emit("prizeWon", {
+        message: "This button has already been picked!"
+      });
+      return;
+    }
+
+    // Record the pick
     lobby.remainingPicks[playerId] -= 1;
     lobby.buttons[button] = true;
 
-    const nickname = lobby.players[playerId]?.nickname || "Unknown Player";
-    const send = (msg, code = null) => io.to(playerId).emit("prizeWon", { message: msg, code });
-
+    // Prepare prize message
     let resultMsg = "Sorry, Better Luck Next Time!";
+    let code = null;
 
     if (lobby.grandPrizeMap[button]) {
-      const { prize, code } = lobby.grandPrizeMap[button];
-      resultMsg = `🎉 GRAND PRIZE! You've Won ${prize}!`;
-      lobby.leaderboard[nickname] = prize;
+      const prizeObj = lobby.grandPrizeMap[button];
+      resultMsg = `🎉 GRAND PRIZE! You've Won ${prizeObj.prize}!`;
+      code = prizeObj.code;
+      lobby.leaderboard[nickname] = prizeObj.prize;
       delete lobby.grandPrizeMap[button];
-      send(resultMsg, code);
     } else if (lobby.consolationMap[button]) {
-      const { prize, code } = lobby.consolationMap[button];
-      resultMsg = `You won a booby prize! Please enjoy ${prize}!`;
-      lobby.leaderboard[nickname] = prize;
+      const prizeObj = lobby.consolationMap[button];
+      resultMsg = `You won a booby prize! Please enjoy ${prizeObj.prize}!`;
+      code = prizeObj.code;
+      lobby.leaderboard[nickname] = prizeObj.prize;
       delete lobby.consolationMap[button];
-      send(resultMsg, code);
     } else {
-      send(`${resultMsg} You still have ${lobby.remainingPicks[playerId]} more tries!`);
+      resultMsg += ` You still have ${lobby.remainingPicks[playerId]} more tries!`;
     }
 
+    // Emit results
+    io.to(playerId).emit("prizeWon", { message: resultMsg, code });
     io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
     io.to(keyphrase).emit("updateRemainingPicks", formatRemainingPicks(lobby));
     io.to(keyphrase).emit("leaderboardUpdate", lobby.leaderboard);
   });
+
 
   socket.on("disconnect", () => {
     for (const key in lobbies) {
