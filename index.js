@@ -56,7 +56,6 @@ io.on("connection", (socket) => {
     config.started = true;
     lobby.config = config;
 
-    // Button setup
     const totalButtons = 99;
     const allButtons = Array.from({ length: totalButtons }, (_, i) => i + 1);
     const shuffle = (arr) => arr.sort(() => 0.5 - Math.random());
@@ -65,37 +64,41 @@ io.on("connection", (socket) => {
     lobby.grandPrizeMap = {};
     lobby.consolationMap = {};
 
-    config.grandPrizes.forEach((prize, i) => {
+    config.grandPrizes.forEach((prize) => {
       const btn = randomized.pop();
       const code = uuidv4();
       lobby.grandPrizeMap[btn] = { prize, code };
     });
 
-    config.consolationPrizes.forEach((prize, i) => {
+    config.consolationPrizes.forEach((prize) => {
       const btn = randomized.pop();
       const code = uuidv4();
       lobby.consolationMap[btn] = { prize, code };
     });
 
-    // Setup picks per player
     Object.entries(lobby.players).forEach(([id, player]) => {
       const isHost = id === lobby.host;
-      lobby.remainingPicks[player.nickname] = (isHost && !config.hostIsPlayer) ? 0 : config.picks;
+      lobby.remainingPicks[id] = (isHost && !config.hostIsPlayer) ? 0 : config.picks;
     });
 
-    io.to(keyphrase).emit("updateRemainingPicks", lobby.remainingPicks);
+    io.to(keyphrase).emit("updateRemainingPicks", formatRemainingPicks(lobby));
     io.to(keyphrase).emit("startCountdown");
   });
 
-  socket.on("pickButton", ({ keyphrase, button, nickname }) => {
+  socket.on("pickButton", ({ keyphrase, button }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby || !lobby.config || lobby.remainingPicks[nickname] <= 0) return;
+    if (!lobby || !lobby.config) return;
+
+    const playerId = socket.id;
+    if (lobby.remainingPicks[playerId] <= 0) return;
     if (!lobby.config.allowDuplicates && lobby.buttons[button]) return;
 
-    lobby.remainingPicks[nickname] -= 1;
+    lobby.remainingPicks[playerId] -= 1;
     lobby.buttons[button] = true;
 
-    const send = (msg, code = null) => io.to(socket.id).emit("prizeWon", { message: msg, code });
+    const nickname = lobby.players[playerId]?.nickname || "Unknown Player";
+    const send = (msg, code = null) => io.to(playerId).emit("prizeWon", { message: msg, code });
+
     let resultMsg = "Sorry, Better Luck Next Time!";
 
     if (lobby.grandPrizeMap[button]) {
@@ -111,11 +114,11 @@ io.on("connection", (socket) => {
       delete lobby.consolationMap[button];
       send(resultMsg, code);
     } else {
-      send(`${resultMsg} You still have ${lobby.remainingPicks[nickname]} more tries!`);
+      send(`${resultMsg} You still have ${lobby.remainingPicks[playerId]} more tries!`);
     }
 
     io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
-    io.to(keyphrase).emit("updateRemainingPicks", lobby.remainingPicks);
+    io.to(keyphrase).emit("updateRemainingPicks", formatRemainingPicks(lobby));
     io.to(keyphrase).emit("leaderboardUpdate", lobby.leaderboard);
   });
 
@@ -131,6 +134,15 @@ io.on("connection", (socket) => {
     }
   });
 });
+
+function formatRemainingPicks(lobby) {
+  const out = {};
+  for (const id in lobby.players) {
+    const nickname = lobby.players[id].nickname;
+    out[nickname] = lobby.remainingPicks[id] ?? 0;
+  }
+  return out;
+}
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server on ${PORT}`));
