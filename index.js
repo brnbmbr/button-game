@@ -1,7 +1,7 @@
 const express = require("express");
 const http = require("http");
-const cors = require("cors");
 const { Server } = require("socket.io");
+const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
@@ -15,154 +15,125 @@ const io = new Server(server, {
   }
 });
 
-// Store lobbies
+// In-memory store for active lobbies
 const lobbies = {};
 
 io.on("connection", (socket) => {
-  console.log("New client:", socket.id);
+  console.log(`Client connected: ${socket.id}`);
 
-  // Create a new lobby
+  // Create lobby
   socket.on("createLobby", ({ keyphrase, nickname }) => {
     lobbies[keyphrase] = {
       host: socket.id,
-      players: {},
+      players: [{ id: socket.id, nickname }],
       config: null,
-      board: new Set(),
-      prizeLocations: {},
-      prizeCodes: {},
-    };
-    lobbies[keyphrase].players[nickname] = {
-      id: socket.id,
-      nickname,
-      remainingPicks: 0,
-      hasJoined: true,
+      picks: {},
+      prizeMap: {},
+      leaderboard: {},
+      clicked: new Set()
     };
     socket.join(keyphrase);
-    io.to(keyphrase).emit("joined", { players: Object.values(lobbies[keyphrase].players) });
+    io.to(keyphrase).emit("joined", { players: lobbies[keyphrase].players });
   });
 
-  // Join existing lobby
-  socket.on("joinLobby", ({ keyphrase, nickname }) => {
+  // Join lobby
+  socket.on("joinLobby", ({ keyphrase, nickname, entryKey }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby || lobby.config || lobby.players[nickname]) return;
-
-    lobby.players[nickname] = {
-      id: socket.id,
-      nickname,
-      remainingPicks: 0,
-      hasJoined: true,
-    };
+    if (!lobby) return;
+    lobby.players.push({ id: socket.id, nickname, entryKey });
     socket.join(keyphrase);
-    io.to(keyphrase).emit("joined", { players: Object.values(lobby.players) });
+    io.to(keyphrase).emit("joined", { players: lobby.players });
   });
 
-  // Start the game
+  // Start game
   socket.on("startGame", ({ keyphrase, config }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby || lobby.host !== socket.id) return;
+    if (!lobby || socket.id !== lobby.host) return;
 
     lobby.config = config;
 
-    // Assign random prize buttons
-    const allButtons = [...Array(99)].map((_, i) => i + 1);
-    const shuffle = (arr) => arr.sort(() => Math.random() - 0.5);
-    const randomButtons = shuffle([...allButtons]);
+    // Randomly assign prize buttons
+    const totalButtons = 99;
+    const buttons = [...Array(totalButtons).keys()].map((i) => i + 1);
+    buttons.sort(() => Math.random() - 0.5);
 
-    let prizeIndex = 0;
+    const prizeMap = {};
+    let i = 0;
 
-    // Assign grand prizes
     for (const prize of config.grandPrizes) {
-      const btn = randomButtons[prizeIndex++];
-      lobby.prizeLocations[btn] = { type: "grand", label: prize };
-      lobby.prizeCodes[btn] = uuidv4().slice(0, 6).toUpperCase();
+      prizeMap[buttons[i++]] = { type: "grand", value: prize, code: uuidv4() };
     }
 
-    // Assign consolation prizes
     for (const prize of config.consolationPrizes) {
-      const btn = randomButtons[prizeIndex++];
-      lobby.prizeLocations[btn] = { type: "consolation", label: prize };
-      lobby.prizeCodes[btn] = uuidv4().slice(0, 6).toUpperCase();
+      prizeMap[buttons[i++]] = { type: "consolation", value: prize, code: uuidv4() };
     }
 
-    // Assign pick counts
-    for (const nickname in lobby.players) {
-      const isHost = lobby.host === lobby.players[nickname].id;
-      const allowHost = config.hostIsPlayer;
-      const picks = isHost && !allowHost ? 0 : config.picks;
-      lobby.players[nickname].remainingPicks = picks;
+    lobby.prizeMap = prizeMap;
+
+    // Assign picks
+    lobby.picks = {};
+    for (const p of lobby.players) {
+      if (!config.hostIsPlayer && p.id === lobby.host) continue;
+      lobby.picks[p.nickname] = config.picks;
     }
 
-    const pickMap = {};
-    for (const [name, data] of Object.entries(lobby.players)) {
-      pickMap[name] = data.remainingPicks;
-    }
-
+    io.to(keyphrase).emit("updateRemainingPicks", lobby.picks);
     io.to(keyphrase).emit("startCountdown");
-    io.to(keyphrase).emit("updateRemainingPicks", pickMap);
   });
 
-  // Handle button pick
+  // Player picks a button
   socket.on("pickButton", ({ keyphrase, button, nickname }) => {
     const lobby = lobbies[keyphrase];
-    if (!lobby || !lobby.players[nickname]) return;
+    if (!lobby || lobby.clicked.has(button)) return;
 
-    const player = lobby.players[nickname];
+    const picksRemaining = lobby.picks[nickname];
+    if (picksRemaining === undefined || picksRemaining <= 0) return;
 
-    if (player.remainingPicks <= 0 || lobby.board.has(button)) return;
+    // Decrement pick count
+    lobby.picks[nickname] -= 1;
+    lobby.clicked.add(button);
+    io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
+    io.to(keyphrase).emit("updateRemainingPicks", lobby.picks);
 
-    player.remainingPicks -= 1;
-    lobby.board.add(button);
+    const prize = lobby.prizeMap[button];
 
-    const result = lobby.prizeLocations[button];
-    const code = lobby.prizeCodes[button];
-    let message;
+    if (prize) {
+      // Update leaderboard
+      lobby.leaderboard[nickname] = prize.value;
+      io.to(keyphrase).emit("leaderboardUpdate", lobby.leaderboard);
 
-    if (result?.type === "grand") {
-      message = `🎉 GRAND PRIZE! You've won ${result.label}!`;
-    } else if (result?.type === "consolation") {
-      message = `You won a consolation prize: ${result.label}`;
-    } else {
-      const tries = player.remainingPicks;
-      message = `Sorry, better luck next time. You have ${tries} picks remaining.`;
-    }
-
-    if (result) {
-      io.to(socket.id).emit("prizeWon", { message, code });
-      io.to(keyphrase).emit("leaderboardUpdate", {
-        ...Object.fromEntries(
-          Object.entries(lobby.players).map(([k, p]) => [
-            k,
-            p.remainingPicks < config.picks ? result.label : ""
-          ])
-        ),
+      // Notify winner
+      io.to(socket.id).emit("prizeWon", {
+        message: prize.type === "grand"
+          ? `GRAND PRIZE! You've won ${prize.value}`
+          : `You won a booby prize! Please enjoy ${prize.value}.`,
+        code: prize.code
       });
     } else {
+      const tries = lobby.picks[nickname];
+      const message =
+        tries > 0
+          ? `Sorry, Better Luck Next Time! You still have ${tries} more tries!`
+          : `Sorry, Better Luck Next Time! You're out of tries.`;
       io.to(socket.id).emit("prizeWon", { message });
     }
-
-    // Update the board for all clients
-    io.to(keyphrase).emit("boardUpdate", { buttonNumber: button });
-
-    // Send updated pick map
-    const updated = {};
-    for (const [name, data] of Object.entries(lobby.players)) {
-      updated[name] = data.remainingPicks;
-    }
-    io.to(keyphrase).emit("updateRemainingPicks", updated);
   });
 
-  // Disconnect cleanup
+  // Disconnect handler
   socket.on("disconnect", () => {
     for (const key in lobbies) {
       const lobby = lobbies[key];
-      const playerEntry = Object.entries(lobby.players).find(([_, v]) => v.id === socket.id);
-      if (playerEntry) {
-        const [nickname] = playerEntry;
-        delete lobby.players[nickname];
-        io.to(key).emit("joined", { players: Object.values(lobby.players) });
+      const idx = lobby.players.findIndex((p) => p.id === socket.id);
+      if (idx !== -1) {
+        const playerName = lobby.players[idx].nickname;
+        lobby.players.splice(idx, 1);
+        delete lobby.picks[playerName];
+        delete lobby.leaderboard[playerName];
 
-        if (Object.keys(lobby.players).length === 0) {
+        if (lobby.players.length === 0 || lobby.host === socket.id) {
           delete lobbies[key];
+        } else {
+          io.to(key).emit("joined", { players: lobby.players });
         }
         break;
       }
@@ -170,6 +141,8 @@ io.on("connection", (socket) => {
   });
 });
 
-// Start server
+// Launch server
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Backend running on port", PORT));
+server.listen(PORT, () => {
+  console.log(`Backend running on port ${PORT}`);
+});
